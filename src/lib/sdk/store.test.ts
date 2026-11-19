@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { clearLocalBackups, loadLocalBackup, saveLocalBackup } from "./store";
+import { clearLocalBackups, loadLocalBackup, saveLocalBackup, versionOf } from "./store";
 
 const backup = {
   v: 1 as const,
@@ -32,5 +32,13 @@ describe("wallet backup storage", () => {
     expect(loadLocalBackup("wallet-1")).toBeNull();
     expect(() => clearLocalBackups()).not.toThrow();
     expect(warning).toHaveBeenCalled();
+  });
+});
+
+describe("versionOf", () => {
+  it("prefers backup_version, falls back to the blob string", () => {
+    expect(versionOf({ backup_version: "v2", encrypted_backup: "blob" })).toBe("v2");
+    expect(versionOf({ backup_version: null, encrypted_backup: "blob" })).toBe("blob");
+    expect(versionOf({})).toBe("");
   });
 });

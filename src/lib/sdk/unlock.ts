@@ -8,51 +8,50 @@
  * keeps working across devices.
  */
 import { Keypair } from "@stellar/stellar-base";
-import { decryptSeed } from "./crypto";
+import { decryptSeed, WrongPasswordError } from "./crypto";
 import { fromMnemonic } from "./keys";
 import { getBackup } from "./client";
-import { loadLocalBackup, saveLocalBackup } from "./store";
+import { loadLocalBackup, saveLocalBackup, versionOf } from "./store";
 import { parseBackup } from "./crypto";
 
 export const MISSING_BACKUP_ERROR =
   'No key backup found for this wallet. Use "Recover wallet" on the wallet overview page.';
 
-/** The decryption failed because the password is wrong (not a malformed blob). */
-function isWrongPasswordError(err: unknown): boolean {
-  return err instanceof Error && /Incorrect password|corrupted backup/.test(err.message);
-}
-
-/** Decrypt + unlock from a specific backup blob; throws on wrong password or key mismatch. */
+/** Decrypt a specific backup blob; throws on wrong password or key mismatch. */
 async function unlockFromBackup(
   backup: ReturnType<typeof parseBackup>,
   password: string,
   expectedPublicKey?: string,
-): Promise<Keypair> {
+): Promise<string> {
   const mnemonic = await decryptSeed(backup, password);
-  const keypair = fromMnemonic(mnemonic).keypair;
-  if (expectedPublicKey !== undefined && keypair.publicKey() !== expectedPublicKey) {
+  if (expectedPublicKey !== undefined && fromMnemonic(mnemonic).publicKey !== expectedPublicKey) {
     throw new Error("Unlocked key does not match this wallet. Aborting unlock.");
   }
-  return keypair;
+  return mnemonic;
 }
 
-export async function unlockWallet(
+/**
+ * Reconcile the local cache with the server copy and decrypt. The address check runs on every
+ * path (local cache and server), so callers never receive another wallet's mnemonic.
+ */
+export async function unlockBackup(
   token: string,
   walletId: string,
   password: string,
   expectedPublicKey?: string,
-): Promise<Keypair> {
+): Promise<{ mnemonic: string; backup: ReturnType<typeof parseBackup>; version: string }> {
   const local = loadLocalBackup(walletId);
 
   // Fast path: the cached copy decrypts — no network round-trip.
   if (local) {
     try {
-      return await unlockFromBackup(local.backup, password, expectedPublicKey);
+      const mnemonic = await unlockFromBackup(local.backup, password, expectedPublicKey);
+      return { mnemonic, backup: local.backup, version: local.version };
     } catch (err) {
       // Decryption failed: either a wrong password, or the cache is stale (e.g. the password was
       // changed on another device). Only wrong-password errors fall through to the server check;
-      // anything else (malformed blob) is rethrown.
-      if (!isWrongPasswordError(err)) throw err;
+      // anything else (malformed blob, key mismatch) is rethrown.
+      if (!(err instanceof WrongPasswordError)) throw err;
     }
   }
 
@@ -62,16 +61,27 @@ export async function unlockWallet(
     throw new Error(MISSING_BACKUP_ERROR);
   }
 
-  const serverVersion = remote.backup_version ?? remote.encrypted_backup;
+  const serverVersion = versionOf(remote);
   const localVersion = local?.version ?? "";
 
   if (!local || serverVersion !== localVersion) {
     // Stale or missing cache — replace it with the server-authoritative copy.
     const parsed = parseBackup(remote.encrypted_backup);
     saveLocalBackup(walletId, parsed, serverVersion);
-    return unlockFromBackup(parsed, password, expectedPublicKey);
+    const mnemonic = await unlockFromBackup(parsed, password, expectedPublicKey);
+    return { mnemonic, backup: parsed, version: serverVersion };
   }
 
   // Cache version matches the server: the password is simply wrong.
-  throw new Error("Incorrect password or corrupted backup.");
+  throw new WrongPasswordError();
+}
+
+export async function unlockWallet(
+  token: string,
+  walletId: string,
+  password: string,
+  expectedPublicKey?: string,
+): Promise<Keypair> {
+  const { mnemonic } = await unlockBackup(token, walletId, password, expectedPublicKey);
+  return fromMnemonic(mnemonic).keypair;
 }

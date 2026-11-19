@@ -5,8 +5,10 @@ export type CsvColumn<T> = { header: string; value: (row: T) => string | number 
 /** Quote a cell for CSV; formula-leading characters are neutralised with a leading apostrophe. */
 export function escapeCsvCell(input: string | number | null | undefined): string {
   let s = input === null || input === undefined ? "" : String(input);
-  // Leading = + - @ tab or CR would be evaluated as a formula by Excel/Sheets.
-  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  // Plain numbers (incl. negatives) are safe and must stay numeric.
+  const isPlainNumber = typeof input === "number" || typeof input === "bigint" || /^-?\d+(\.\d+)?$/.test(s);
+  // Leading = + - @ | tab or CR (or fullwidth variants) after optional whitespace would be evaluated as a formula.
+  if (!isPlainNumber && /^[=+\-@|\t\r＝＋－＠]/.test(s.trimStart())) s = `'${s}`;
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 

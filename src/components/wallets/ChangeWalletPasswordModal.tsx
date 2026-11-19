@@ -6,15 +6,11 @@ import { toast } from "sonner";
 import { Modal } from "@/components/dashboard/Modal";
 import {
   encryptSeed,
-  decryptSeed,
   serializeBackup,
   uploadBackup,
   saveLocalBackup,
-  loadLocalBackup,
-  getBackup,
-  parseBackup,
+  unlockBackup,
 } from "@/lib/sdk";
-import { fromMnemonic } from "@/lib/sdk/keys";
 import { assessPassword, PasswordStrengthMeter, MIN_PASSWORD_LENGTH, type PasswordAssessment } from "@/lib/passwordStrength";
 
 /**
@@ -60,47 +56,6 @@ export function ChangeWalletPasswordModal({
     } catch { setPwFeedback([]); setPwAssessment(null); }
   }
 
-  /** Load the authoritative backup, refreshing the local cache if it is stale. */
-  async function loadAuthoritativeBackup(password: string) {
-    const local = loadLocalBackup(walletId);
-    if (local) {
-      try {
-        const mnemonic = await decryptSeed(local.backup, password);
-        return { mnemonic, backup: local.backup, version: local.version };
-      } catch (err) {
-        // Wrong password or a stale cache — fall through to the server copy below.
-        if (!(err instanceof Error) || !/Incorrect password|corrupted backup/.test(err.message)) {
-          throw err;
-        }
-      }
-    }
-    const remote = await getBackup(token, walletId);
-    if (!remote || !remote.encrypted_backup) {
-      throw new Error("No backup found for this wallet. Recover it with your recovery phrase first.");
-    }
-    const serverVersion = remote.backup_version ?? remote.encrypted_backup;
-    if (!local || serverVersion !== local.version) {
-      const parsed = parseBackup(remote.encrypted_backup);
-      saveLocalBackup(walletId, parsed, serverVersion);
-      const mnemonic = await decryptSeed(parsed, password);
-      try {
-        const derived = fromMnemonic(mnemonic);
-        if (walletAddress && derived.publicKey !== walletAddress) {
-          throw new Error("Decrypted key does not match this wallet.");
-        }
-      } catch (err) {
-        const message = errorMessage(err, "Decrypted key does not match this wallet.");
-        if (/does not match this wallet/i.test(message)) {
-          throw err;
-        }
-        throw new Error("Decrypted key does not match this wallet.");
-      }
-      return { mnemonic, backup: parsed, version: serverVersion };
-    }
-    // Cache matches the server: the password is wrong.
-    throw new Error("Incorrect password or corrupted backup.");
-  }
-
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
@@ -132,22 +87,10 @@ export function ChangeWalletPasswordModal({
     setBusy(true);
     let mnemonic = "";
     try {
-      // Decrypt the current backup (local, refreshed from the server if stale). Throws on wrong
-      // password or if no backup exists anywhere.
-      const { mnemonic: decrypted } = await loadAuthoritativeBackup(currentPassword);
-      mnemonic = decrypted;
-      try {
-        const derived = fromMnemonic(mnemonic);
-        if (walletAddress && derived.publicKey !== walletAddress) {
-          throw new Error("Decrypted key does not match this wallet.");
-        }
-      } catch (err) {
-        const message = errorMessage(err, "Decrypted key does not match this wallet.");
-        if (/does not match this wallet/i.test(message)) {
-          throw err;
-        }
-        throw new Error("Decrypted key does not match this wallet.");
-      }
+      // Decrypt the current backup via the SDK (local first, refreshed from the server if
+      // stale). Throws on wrong password, address mismatch, or if no backup exists anywhere.
+      const unlocked = await unlockBackup(token, walletId, currentPassword, walletAddress || undefined);
+      mnemonic = unlocked.mnemonic;
       // Re-encrypt under new password.
       const newBackup = await encryptSeed(mnemonic, newPassword);
       const serialized = serializeBackup(newBackup);

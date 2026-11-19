@@ -1,6 +1,5 @@
 "use client";
 
-import { errorMessage } from "@/lib/api";
 import { use, useCallback, useMemo, useState } from "react";
 import { useCursorPagination } from "@/lib/useCursorPagination";
 import { useAuth } from "@/lib/useAuth";
@@ -38,7 +37,6 @@ export default function TransactionsPage({
   const [selected, setSelected] = useState<Transaction | null>(null);
   const {
     rows: txns,
-    setRows: setTxns,
     page,
     hasPrev,
     hasNext,

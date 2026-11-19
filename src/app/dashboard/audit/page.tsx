@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useAuth } from "@/lib/useAuth";
-import { listAuditLogsPage, type AuditLog } from "@/lib/audit";
+import { listAuditLogsPage } from "@/lib/audit";
 import { useCursorPagination } from "@/lib/useCursorPagination";
 import { Pagination } from "@/components/dashboard/Pagination";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";

@@ -1,7 +1,7 @@
 "use client";
 
 import { errorMessage } from "@/lib/api";
-import { useId, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { ActionButton } from "@/components/dashboard/WalletUI";
 import { asAuthToken, asWalletId } from "@/lib/brands";
 import { formatStroops } from "@/lib/amount";
@@ -33,6 +33,8 @@ export function EditPaymentLinkForm({
   // imageUrl is the stored image; a picked file replaces it only when the form is saved.
   const [imageUrl, setImageUrl] = useState<string | null>(link.image_url);
   const [imageFile, setImageFile] = useState<File | null>(null);
+  const uploadAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => uploadAbortRef.current?.abort(), []);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const formId = useId();
@@ -65,7 +67,10 @@ export function EditPaymentLinkForm({
     setSaving(true);
     setError(null);
     try {
-      const nextImageUrl = imageFile ? await uploadImage(token, imageFile) : imageUrl;
+      uploadAbortRef.current = new AbortController();
+      const nextImageUrl = imageFile
+        ? await uploadImage(token, imageFile, { signal: uploadAbortRef.current.signal })
+        : imageUrl;
       onSaved(
         await updatePaymentLink(asAuthToken(token), asWalletId(walletId), link.id, {
           name: name.trim(),
@@ -75,6 +80,7 @@ export function EditPaymentLinkForm({
         }),
       );
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       setError(errorMessage(err, "Could not save the link."));
     } finally {
       setSaving(false);
@@ -168,6 +174,15 @@ export function EditPaymentLinkForm({
         >
           Cancel
         </button>
+        {saving && imageFile && (
+          <button
+            type="button"
+            onClick={() => uploadAbortRef.current?.abort()}
+            className="rounded-lg border border-border bg-surface-raised px-4 py-2 text-sm text-foreground transition-colors hover:border-burgundy/50"
+          >
+            Cancel upload
+          </button>
+        )}
         <ActionButton
           type="submit"
           label={saving ? "Saving…" : "Save changes"}

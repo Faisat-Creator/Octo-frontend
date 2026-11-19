@@ -9,6 +9,8 @@ export function validateRedirectUrl(value: string): string | null {
     return "Redirect URL is required.";
   }
 
+  if (value.length > 2048) return "Redirect URL is too long (max 2048 characters).";
+
   let url: URL;
   try {
     url = new URL(value);
@@ -24,7 +26,10 @@ export function validateRedirectUrl(value: string): string | null {
 
   // Restrict to public HTTPS hosts; reject IP addresses and localhost to prevent
   // SSRF-style redirects to internal services.
-  const host = url.hostname;
+  if (url.username || url.password) return "Redirect URL cannot contain embedded credentials.";
+  // Normalise: strip one trailing dot (FQDN form) and lowercase.
+  const host = url.hostname.replace(/\.$/, "").toLowerCase();
+  if (host.startsWith("[")) return "Redirect URL host cannot be an IPv6 address.";
   if (!host) return "Redirect URL must include a host.";
   if (/^(\d{1,3}\.){3}\d{1,3}$/.test(host)) return "Redirect URL host cannot be an IP address.";
   if (host === "localhost" || host.endsWith(".localhost")) return "Redirect URL cannot point to localhost.";

@@ -131,6 +131,10 @@ export type PublicPaymentLink = {
   image_url: string | null;
   redirect_url: string | null;
   amount_usdc_stroops: number | null;
+  /** Backend-enforced minimum for flexible links, in USDC stroops. Falls back to MIN_FLEXIBLE_USD. */
+  min_amount_usdc_stroops?: number | null;
+  /** Optional backend-enforced maximum for flexible links, in USDC stroops. */
+  max_amount_usdc_stroops?: number | null;
   deposit_address: string;
   asset_code: string;
 };
@@ -218,6 +222,22 @@ export function submitPublicPayment(
 /** Parse a decimal USD amount string into integer USDC stroops, or null if invalid. */
 export function usdAmountToStroops(usd: string): number | null {
   return toApiStroops(parseAmount(usd));
+}
+
+/** Default minimum for flexible-amount links: $0.01 (10,000 stroops). */
+export const MIN_FLEXIBLE_USD = 0.01;
+
+/** Effective min/max (in USDC stroops) for a flexible link, falling back to MIN_FLEXIBLE_USD. */
+export function flexibleAmountBounds(link: PublicPaymentLink): {
+  minStroops: number;
+  maxStroops: number | null;
+} {
+  const minStroops =
+    link.min_amount_usdc_stroops ?? Math.round(MIN_FLEXIBLE_USD * 10_000_000);
+  return {
+    minStroops,
+    maxStroops: link.max_amount_usdc_stroops ?? null,
+  };
 }
 
 /** Basic shape check (not full RFC 5322) — enough to catch typos before submitting. */

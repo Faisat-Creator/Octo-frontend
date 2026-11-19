@@ -1,7 +1,7 @@
 "use client";
 
 import { errorMessage } from "@/lib/api";
-import { useId, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { Modal } from "@/components/dashboard/Modal";
 import { ActionButton } from "@/components/dashboard/WalletUI";
 import { ALLOWED_IMAGE_HINT, ALLOWED_IMAGE_TYPES, uploadImage, validateImage } from "@/lib/uploads";
@@ -29,6 +29,8 @@ export function CreatePaymentLinkForm({
   const [amount, setAmount] = useState("");
   const [redirectUrl, setRedirectUrl] = useState("");
   const [imageFile, setImageFile] = useState<File | null>(null);
+  const uploadAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => uploadAbortRef.current?.abort(), []);
   const [error, setError] = useState<string | null>(null);
   const formId = useId();
 
@@ -67,7 +69,10 @@ export function CreatePaymentLinkForm({
         setCreating(false);
         return;
       }
-      const uploadedImageUrl = imageFile ? await uploadImage(token, imageFile) : undefined;
+      uploadAbortRef.current = new AbortController();
+      const uploadedImageUrl = imageFile
+        ? await uploadImage(token, imageFile, { signal: uploadAbortRef.current.signal })
+        : undefined;
       const link = await createPaymentLink(asAuthToken(token), asWalletId(walletId), {
         name: name.trim(),
         description: description.trim() || undefined,
@@ -77,6 +82,7 @@ export function CreatePaymentLinkForm({
       });
       onCreated(link);
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       setError(errorMessage(err, "Could not create the link."));
     } finally {
       setCreating(false);
@@ -178,6 +184,15 @@ export function CreatePaymentLinkForm({
           >
             Cancel
           </button>
+          {creating && imageFile && (
+            <button
+              type="button"
+              onClick={() => uploadAbortRef.current?.abort()}
+              className="rounded-lg border border-border bg-surface-raised px-4 py-2 text-sm text-foreground transition-colors hover:border-burgundy/50"
+            >
+              Cancel upload
+            </button>
+          )}
           <ActionButton
             label={creating ? "Creating…" : "Create Link"}
             disabled={!name.trim() || creating}

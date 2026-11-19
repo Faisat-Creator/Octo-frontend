@@ -1,6 +1,5 @@
 "use client";
 
-import { formatCountdownMs } from "@/lib/format";
 import { use, useCallback, useEffect, useRef, useState } from "react";
 import { Logo } from "@/components/Logo";
 import { CopyButton } from "@/components/CopyButton";
@@ -21,14 +20,17 @@ import {
 import { usdcForNetwork } from "@/lib/network";
 import { network } from "@/lib/network";
 import { buildUnsignedPayment, assertNetworkConsistency } from "@/lib/sdk";
+import { assertSignedMatchesBuilt } from "@/lib/sdk/signedTxCheck";
 import { OctoSpinner } from "@/components/OctoSpinner";
 import { PayerPrivacyNotice } from "@/components/checkout/PayerPrivacyNotice";
 import confetti from "canvas-confetti";
-import { formatStroops } from "@/lib/amount";
+import { formatStroops, parseAmount } from "@/lib/amount";
+import { explorerTxUrl } from "@/lib/explorer";
 import { ApiError, errorMessage } from "@/lib/api";
 import { friendlyResultMessage } from "@/lib/stellar/resultCodes";
 import { isTrustedImageUrl } from "@/lib/isTrustedImageUrl";
 import { validateRedirectUrl } from "@/lib/redirectUrl";
+import { formatCountdownMs } from "@/lib/format";
 
 type Step = "loading" | "not-found" | "error" | "form" | "pay" | "confirmed";
 
@@ -40,6 +42,15 @@ const MAX_POLL_MS = 30 * 60_000;
 
 /** Warn the payer once this much time is left before the intent expires. */
 const EXPIRY_WARNING_MS = 2 * 60_000;
+
+/** Minimum flexible amount in USD, used when the link doesn't specify one. */
+const MIN_FLEXIBLE_USD = 0.01;
+
+/** Minimum flexible amount in stroops (1 USDC = 10,000,000 stroops). */
+const MIN_FLEXIBLE_USD_STROOPS = Math.round(MIN_FLEXIBLE_USD * 10_000_000);
+
+/** Human-readable minimum for error copy. */
+const MIN_FLEXIBLE_USD_LABEL = `$${MIN_FLEXIBLE_USD.toFixed(2)}`;
 
 // Status poll interval, backing off 3s → 5s → 10s the longer the payer waits.
 function pollDelayMs(elapsedMs: number) {
@@ -53,35 +64,71 @@ function intentInputsKey(amountUsdcStroops: number, name: string, email: string)
   return JSON.stringify([amountUsdcStroops, name, email.toLowerCase()]);
 }
 
-// Formats a millisecond countdown as m:ss (or h:mm:ss past an hour) for the payer.
 function celebrate() {
-  confetti({ 
-    particleCount: 140, 
-    spread: 80, 
+  confetti({
+    particleCount: 140,
+    spread: 80,
     origin: { y: 0.6 },
-    disableForReducedMotion: true 
+    disableForReducedMotion: true,
   });
 }
 
-// Sends the payer back to the merchant's site after a short delay; only https: URLs are followed and it fails closed on a bad URL.
-function redirectAfterConfirm(redirectUrl: string, paymentId: string, slugValue: string) {
+// Builds the merchant return URL; only https: URLs are followed and it fails closed on a bad URL.
+function buildMerchantReturnUrl(redirectUrl: string, paymentId: string, slugValue: string): string | null {
   const error = validateRedirectUrl(redirectUrl);
   if (error) {
     // malformed or unsafe redirect_url — stay on the confirmed page instead of redirecting
-    return;
+    return null;
   }
   try {
     const url = new URL(redirectUrl);
-    if (url.protocol !== "https:") return;
+    if (url.protocol !== "https:") return null;
     url.searchParams.set("status", "success");
     url.searchParams.set("payment_id", paymentId);
     url.searchParams.set("slug", slugValue);
-    setTimeout(() => {
-      window.location.href = url.toString();
-    }, 2000);
+    return url.toString();
   } catch {
     // malformed redirect_url — stay on the confirmed page
+    return null;
   }
+}
+
+// A Stellar transaction hash is 64 hex characters; anything else is an internal reference.
+function isStellarTxHash(value: string | null | undefined): value is string {
+  return typeof value === "string" && /^[0-9a-fA-F]{64}$/.test(value);
+}
+
+// Shortens a hash for display while keeping the head and tail recognizable.
+function shortenHash(hash: string) {
+  if (hash.length <= 16) return hash;
+  return `${hash.slice(0, 8)}…${hash.slice(-8)}`;
+}
+
+// Resolves the min/max flexible bounds for a link, falling back to the client-side minimum.
+function flexibleBounds(link: PublicPaymentLink) {
+  const min =
+    typeof link.min_amount_usdc_stroops === "number" && link.min_amount_usdc_stroops > 0
+      ? link.min_amount_usdc_stroops
+      : MIN_FLEXIBLE_USD_STROOPS;
+  const max =
+    typeof link.max_amount_usdc_stroops === "number" && link.max_amount_usdc_stroops > 0
+      ? link.max_amount_usdc_stroops
+      : null;
+  return { min, max };
+}
+
+// Returns an error message for an out-of-bounds flexible amount, or null when it's acceptable.
+function validateFlexibleAmount(
+  amountUsdcStroops: number,
+  bounds: { min: number; max: number | null },
+): string | null {
+  if (amountUsdcStroops < bounds.min) {
+    return `Enter at least $${formatStroops(bounds.min)}.`;
+  }
+  if (bounds.max !== null && amountUsdcStroops > bounds.max) {
+    return `Enter at most $${formatStroops(bounds.max)}.`;
+  }
+  return null;
 }
 
 export default function PayPage({
@@ -116,6 +163,17 @@ export default function PayPage({
   const [now, setNow] = useState<number | null>(null);
   // Bumped by the retry button to load the link again.
   const [attempt, setAttempt] = useState(0);
+  // Transaction reference captured at confirmation (Stellar hash or internal id).
+  const [txRef, setTxRef] = useState<string | null>(null);
+  // Amount actually confirmed, captured so the receipt survives intent changes.
+  const [confirmedAmountStroops, setConfirmedAmountStroops] = useState<number | null>(null);
+  // Merchant return URL built at confirmation time (null when there is none or it's unsafe).
+  const [returnUrl, setReturnUrl] = useState<string | null>(null);
+  // Field-level validation flags driving aria-invalid on the checkout inputs.
+  const [nameInvalid, setNameInvalid] = useState(false);
+  const [emailInvalid, setEmailInvalid] = useState(false);
+  // Normalized flexible amount, computed once per render so the header and pay step agree.
+  const parsed = parseAmount(amount);
 
   useEffect(() => {
     setStep("loading");
@@ -155,14 +213,14 @@ export default function PayPage({
 
   // The single path for every confirmation source (poll, check-now, Freighter).
   const markConfirmed = useCallback(
-    (paymentId: string) => {
+    (paymentId: string, txReference: string | null, amountStroops: number | null) => {
       if (confirmedRef.current) return;
       confirmedRef.current = true;
+      setTxRef(txReference);
+      setConfirmedAmountStroops(amountStroops);
+      setReturnUrl(link?.redirect_url ? buildMerchantReturnUrl(link.redirect_url, paymentId, slug) : null);
       setStep("confirmed");
       celebrate();
-      if (link?.redirect_url) {
-        redirectAfterConfirm(link.redirect_url, paymentId, slug);
-      }
     },
     [link, slug],
   );
@@ -172,7 +230,7 @@ export default function PayPage({
     (paymentId: string, status: PaymentStatus): boolean => {
       if (intentRef.current?.intent.payment_id !== paymentId || confirmedRef.current) return true;
       if (status.status === "confirmed") {
-        markConfirmed(paymentId);
+        markConfirmed(paymentId, status.transaction_id, intentRef.current?.intent.amount_usdc_stroops ?? null);
         return true;
       }
       if (status.status === "expired" || status.status === "underpaid" || status.status === "overpaid") {
@@ -183,6 +241,16 @@ export default function PayPage({
     },
     [markConfirmed],
   );
+
+  // Sets a checkout-specific tab title once the link loads; never includes payer data.
+  useEffect(() => {
+    if (!link) return;
+    const previous = document.title;
+    document.title = `Pay ${link.name} · Octo`;
+    return () => {
+      document.title = previous;
+    };
+  }, [link]);
 
   // Expiry is derived from the intent's expires_at so the UI can't drift from the backend.
   const expiresAtMs = intent?.expires_at ? Date.parse(intent.expires_at) : NaN;
@@ -307,22 +375,39 @@ export default function PayPage({
     setError(null);
     try {
       // Name and email are required — a payer's identity must be collectible before they pay.
-      if (!payerName.trim() || !payerEmail.trim()) {
+      const missingName = !payerName.trim();
+      const missingEmail = !payerEmail.trim();
+      if (missingName || missingEmail) {
+        setNameInvalid(missingName);
+        setEmailInvalid(missingEmail);
         setError("Enter your name and email address.");
         setSubmitting(false);
         return;
       }
       if (!isValidEmail(payerEmail.trim())) {
+        setNameInvalid(false);
+        setEmailInvalid(true);
         setError("Enter a valid email address.");
         setSubmitting(false);
         return;
       }
+      setNameInvalid(false);
+      setEmailInvalid(false);
       const amountUsdcStroops =
         link.amount_usdc_stroops ?? usdAmountToStroops(amount);
       if (amountUsdcStroops === null) {
         setError("Enter a valid amount.");
         setSubmitting(false);
         return;
+      }
+      // Flexible links must respect the min/max bounds; the backend enforces the same limit.
+      if (link.amount_usdc_stroops === null) {
+        const boundsError = validateFlexibleAmount(amountUsdcStroops, flexibleBounds(link));
+        if (boundsError) {
+          setError(boundsError);
+          setSubmitting(false);
+          return;
+        }
       }
       // Reuse the intent only if nothing changed; otherwise the deposit address would carry a stale amount.
       const key = intentInputsKey(amountUsdcStroops, payerName.trim(), payerEmail.trim());
@@ -385,10 +470,11 @@ export default function PayPage({
       if (signed.error || !signed.signedTxXdr) {
         throw new Error("Freighter did not return a signed transaction.");
       }
+      assertSignedMatchesBuilt(unsignedXdr, signed.signedTxXdr, info.network_passphrase);
 
       const result = await submitPublicPayment(slug, signed.signedTxXdr, intent.payment_id);
       if (result.status === "confirmed") {
-        markConfirmed(intent.payment_id);
+        markConfirmed(intent.payment_id, result.stellar_tx_hash ?? null, intent.amount_usdc_stroops);
         return;
       }
       throw new Error(
@@ -400,6 +486,16 @@ export default function PayPage({
       setFreighterBusy(false);
     }
   }
+
+  // Inline validation for the flexible amount input.
+  const amountStroops = amount.trim() !== "" ? usdAmountToStroops(amount) : null;
+  const amountBounds = link ? flexibleBounds(link) : { min: MIN_FLEXIBLE_USD_STROOPS, max: null };
+  const amountFormatError = amount.trim() !== "" && amountStroops === null;
+  const amountBoundsError =
+    amountStroops !== null ? validateFlexibleAmount(amountStroops, amountBounds) : null;
+  const amountError = amountFormatError
+    ? "Enter an amount in USD, up to 7 decimal places."
+    : amountBoundsError;
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4 py-12">
@@ -420,11 +516,11 @@ export default function PayPage({
               <p className="text-sm text-muted">Pay {link.name}</p>
               <p className="mt-2 text-4xl font-semibold text-foreground">
                 {link.amount_usdc_stroops !== null
-                  ? `$${formatStroops(link.amount_usdc_stroops)}`
+                  ? `$${formatStroops(link.amount_usdc_stroops, 2)}`
                   : step !== "form" && intent
-                    ? `$${formatStroops(intent.amount_usdc_stroops)}`
-                    : amount && usdAmountToStroops(amount) !== null
-                    ? `$${amount}`
+                    ? `$${formatStroops(intent.amount_usdc_stroops, 2)}`
+                    : parsed.stroops !== null
+                    ? `$${formatStroops(parsed.stroops, 2)}`
                     : "$—"}
               </p>
               {link.description && (
@@ -491,45 +587,61 @@ export default function PayPage({
                     value={amount}
                     onChange={(e) => setAmount(e.target.value)}
                     inputMode="decimal"
-                    aria-invalid={amount.trim() !== "" && usdAmountToStroops(amount) === null}
+                    aria-invalid={amountError !== null}
+                    aria-describedby={amountError !== null ? "payer-amount-error" : undefined}
                     placeholder="0.00"
                     className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm text-gray-900 outline-none focus:border-black"
                   />
-                  {amount.trim() !== "" && usdAmountToStroops(amount) === null && (
-                    <p role="alert" className="mt-1 text-xs text-red-600">
-                      Enter an amount in USD, up to 7 decimal places.
+                  {amountError !== null && (
+                    <p id="payer-amount-error" role="alert" className="mt-1 text-xs text-red-600">
+                      {amountError}
                     </p>
                   )}
                 </Field>
               )}
 
-              <Field label="Enter Personal Information" htmlFor="payer-name">
-                <div className="space-y-2">
-                  <input
-                    id="payer-name"
-                    value={payerName}
-                    onChange={(e) => setPayerName(e.target.value)}
-                    placeholder="Full name"
-                    required
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm text-gray-900 outline-none focus:border-black"
-                  />
-                  <input
-                    value={payerEmail}
-                    onChange={(e) => setPayerEmail(e.target.value)}
-                    placeholder="Email address"
-                    aria-label="Email address"
-                    type="email"
-                    required
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm text-gray-900 outline-none focus:border-black"
-                  />
-                </div>
-                <p className="mt-1 text-[11px] text-gray-500">
+              <Field label="Full name" htmlFor="payer-name">
+                <input
+                  id="payer-name"
+                  name="name"
+                  autoComplete="name"
+                  value={payerName}
+                  onChange={(e) => setPayerName(e.target.value)}
+                  placeholder="Full name"
+                  required
+                  aria-required="true"
+                  aria-invalid={nameInvalid}
+                  aria-describedby="payer-info-hint payer-error"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm text-gray-900 outline-none focus:border-black"
+                />
+              </Field>
+
+              <Field label="Email address" htmlFor="payer-email">
+                <input
+                  id="payer-email"
+                  name="email"
+                  type="email"
+                  inputMode="email"
+                  autoComplete="email"
+                  value={payerEmail}
+                  onChange={(e) => setPayerEmail(e.target.value)}
+                  placeholder="Email address"
+                  required
+                  aria-required="true"
+                  aria-invalid={emailInvalid}
+                  aria-describedby="payer-info-hint payer-error"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm text-gray-900 outline-none focus:border-black"
+                />
+              </Field>
+
+              <div>
+                <p id="payer-info-hint" className="text-[11px] text-gray-500">
                   We use this to send you a confirmation of your payment.
                 </p>
                 <PayerPrivacyNotice merchantName={link.name} />
-              </Field>
+              </div>
 
-              {error && <ErrorBanner message={error} />}
+              {error && <ErrorBanner id="payer-error" message={error} />}
 
               <button
                 type="submit"
@@ -540,7 +652,8 @@ export default function PayPage({
                 {submitting ? "Please wait…" : "Continue"}
               </button>
               <p className="text-center text-[11px] text-gray-400">
-                🔒 Secure and encrypted payment.
+                Payments settle on the Stellar network. Octo never asks for your wallet&apos;s
+                secret key.
               </p>
             </form>
           )}
@@ -567,7 +680,7 @@ export default function PayPage({
                   disabled={freighterBusy}
                   className="text-xs font-medium text-gray-500 hover:text-gray-900 disabled:opacity-50"
                 >
-                  ‹ Back
+                  <span aria-hidden="true">‹ </span>Back
                 </button>
               </div>
 
@@ -579,16 +692,25 @@ export default function PayPage({
                       : "border-gray-200 bg-gray-50 text-gray-600"
                   }`}
                 >
-                  {remainingMs <= EXPIRY_WARNING_MS
-                    ? `⚠️ Less than ${formatCountdownMs(remainingMs)} left — complete your payment now or it will expire.`
-                    : `⏳ Time remaining to pay: ${formatCountdownMs(remainingMs)}`}
+                  {remainingMs <= EXPIRY_WARNING_MS ? (
+                    <>
+                      <span aria-hidden="true">⚠️ </span>
+                      Less than {formatCountdownMs(remainingMs)} left — complete your payment now
+                      or it will expire.
+                    </>
+                  ) : (
+                    <>
+                      <span aria-hidden="true">⏳ </span>
+                      Time remaining to pay: {formatCountdownMs(remainingMs)}
+                    </>
+                  )}
                 </div>
               )}
 
               <div className="rounded-lg border border-gray-200 p-4">
                 <p className="text-xs text-gray-500">Amount</p>
                 <p className="mt-1 text-sm font-medium text-gray-900">
-                  ${formatStroops(intent.amount_usdc_stroops)}
+                  ${formatStroops(intent.amount_usdc_stroops, 2)}
                 </p>
               </div>
 
@@ -655,7 +777,7 @@ export default function PayPage({
                   className="mt-2 flex w-full items-center justify-center gap-2 rounded-lg border border-gray-300 py-2.5 text-sm font-medium text-gray-900 transition-colors hover:border-black disabled:opacity-50"
                 >
                   {freighterBusy && <OctoSpinner size={16} />}
-                  {freighterBusy ? "Connecting…" : "🦄 Connect Freighter"}
+                  {freighterBusy ? "Connecting…" : "Connect Freighter"}
                 </button>
               </div>
               )}
@@ -671,15 +793,69 @@ export default function PayPage({
           )}
 
           {step === "confirmed" && (
-            <div className="flex h-full flex-col items-center justify-center text-center">
-              <p className="text-3xl">✅</p>
+            <div
+              role="status"
+              className="flex h-full flex-col items-center justify-center text-center"
+            >
+              <p className="text-3xl">
+                <span aria-hidden="true">✅</span>
+                <span className="sr-only">Success</span>
+              </p>
               <p className="mt-3 text-lg font-semibold text-gray-900">Payment received</p>
               <p className="mt-2 text-sm text-gray-500">
                 Thank you{payerName ? `, ${payerName}` : ""} — your payment has been
                 confirmed on-chain.
               </p>
-              {link?.redirect_url && (
-                <p className="mt-4 text-[11px] text-gray-400">Redirecting you back…</p>
+
+              <div className="mt-5 w-full rounded-lg border border-gray-200 p-4 text-left">
+                <p className="text-xs text-gray-500">Receipt</p>
+                {confirmedAmountStroops !== null && (
+                  <div className="mt-2 flex items-center justify-between text-sm">
+                    <span className="text-gray-500">Amount</span>
+                    <span className="font-medium text-gray-900">
+                      ${formatStroops(confirmedAmountStroops, 2)}
+                    </span>
+                  </div>
+                )}
+                {link && (
+                  <div className="mt-1 flex items-center justify-between text-sm">
+                    <span className="text-gray-500">Paid to</span>
+                    <span className="font-medium text-gray-900">{link.name}</span>
+                  </div>
+                )}
+                {txRef && (
+                  <div className="mt-1 flex items-center justify-between gap-2 text-sm">
+                    <span className="shrink-0 text-gray-500">Transaction</span>
+                    <span className="flex min-w-0 items-center gap-1">
+                      <span className="truncate font-mono text-xs text-gray-900" title={txRef}>
+                        {shortenHash(txRef)}
+                      </span>
+                      <CopyButton
+                        value={txRef}
+                        className="shrink-0 text-xs text-gray-500 hover:text-gray-900"
+                      />
+                    </span>
+                  </div>
+                )}
+                {txRef && isStellarTxHash(txRef) && (
+                  <a
+                    href={explorerTxUrl(txRef)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="mt-3 inline-block text-xs font-medium text-gray-900 underline hover:no-underline"
+                  >
+                    View on Stellar Expert ↗
+                  </a>
+                )}
+              </div>
+
+              {returnUrl && (
+                <a
+                  href={returnUrl}
+                  className="mt-4 w-full rounded-lg bg-black py-2.5 text-center text-sm font-medium text-white transition-opacity hover:opacity-90"
+                >
+                  Return to merchant
+                </a>
               )}
             </div>
           )}
@@ -756,8 +932,14 @@ function MismatchBanner({
   }[status.status as "expired" | "underpaid" | "overpaid"];
 
   return (
-    <div className="flex h-full flex-col items-center justify-center text-center">
-      <p className="text-3xl">⚠️</p>
+    <div
+      role="status"
+      className="flex h-full flex-col items-center justify-center text-center"
+    >
+      <p className="text-3xl">
+        <span aria-hidden="true">⚠️</span>
+        <span className="sr-only">Warning</span>
+      </p>
       <p className="mt-3 text-lg font-semibold text-gray-900">{copy.title}</p>
       <p className="mt-2 max-w-xs text-sm text-gray-500">{copy.body}</p>
       <button
@@ -765,15 +947,19 @@ function MismatchBanner({
         onClick={onBack}
         className="mt-5 rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-900 hover:border-black"
       >
-        ‹ Back
+        <span aria-hidden="true">‹ </span>Back
       </button>
     </div>
   );
 }
 
-function ErrorBanner({ message }: { message: string }) {
+function ErrorBanner({ id, message }: { id?: string; message: string }) {
   return (
-    <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">
+    <p
+      id={id}
+      role="alert"
+      className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600"
+    >
       {message}
     </p>
   );

@@ -81,9 +81,10 @@ export function TrustlineModal({
     const ok = result.status === "confirmed";
     return (
       <Modal title="USDC trustline" onClose={onDone}>
-        <div className="text-center">
+        <div className="text-center" role="status">
           <p className={`text-3xl ${ok ? "text-burgundy-bright" : "text-warning"}`}>
-            {ok ? "✓" : "!"}
+            <span aria-hidden="true">{ok ? "✓" : "!"}</span>
+            <span className="sr-only">{ok ? "Success" : "Failed"}</span>
           </p>
           <p className="mt-2 font-medium capitalize text-foreground">
             {ok ? "Trustline established" : result.status}
@@ -357,12 +358,6 @@ export function WithdrawModal({
     return { stroops: parsed.stroops };
   }
 
-  function checkedFeeStroops(): bigint {
-    const checked = validate();
-    if ("error" in checked) return BigInt(0);
-    return checked.stroops;
-  }
-
   async function proceedToReview() {
     setError(null);
     const checked = validate();
@@ -472,7 +467,7 @@ export function WithdrawModal({
             });
           }
         }
-      } catch (e) {
+      } catch {
         // ignore decode errors
       }
       setPendingXdr(signedXdr);
@@ -555,9 +550,10 @@ export function WithdrawModal({
     const finish = () => onDone();
     return (
       <Modal title="Withdrawal" onClose={finish}>
-        <div className="text-center">
+        <div className="text-center" role="status">
           <p className={`text-3xl ${ok ? "text-burgundy-bright" : "text-warning"}`}>
-            {ok ? "✓" : "!"}
+            <span aria-hidden="true">{ok ? "✓" : "!"}</span>
+            <span className="sr-only">{ok ? "Success" : "Failed"}</span>
           </p>
           <p className="mt-2 font-medium capitalize text-foreground">
             {result.status}
@@ -659,8 +655,6 @@ export function WithdrawModal({
 
 
   if (reviewed && !pendingXdr) {
-    const checked = validate();
-    const stroops = "stroops" in checked ? checked.stroops : BigInt(0);
     return (
       <Modal title="Review withdrawal" onClose={() => { setReviewed(false); setError(null); }}>
         <p className="text-sm text-muted">
@@ -734,8 +728,11 @@ export function WithdrawModal({
   if (pendingXdr && expired) {
     return (
       <Modal title="Withdrawal expired" onClose={onClose}>
-        <div className="text-center">
-          <p className="text-3xl text-warning">!</p>
+        <div className="text-center" role="status">
+          <p className="text-3xl text-warning">
+            <span aria-hidden="true">!</span>
+            <span className="sr-only">Expired</span>
+          </p>
           <p className="mt-2 text-sm text-muted">
             For your security, a signed withdrawal is only valid for{" "}
             {Math.round(TX_TIMEOUT_SECONDS / 60)} minutes, and this one ran out before

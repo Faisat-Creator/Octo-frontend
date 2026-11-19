@@ -9,7 +9,7 @@
  * cache is stale (e.g. the password was changed on another device) and is refreshed before
  * decryption so the user's current password keeps working across devices.
  */
-import { parseBackup, type EncryptedBackup } from "./crypto";
+import { parseBackup, serializeBackup, type EncryptedBackup } from "./crypto";
 
 const PREFIX = "octo_wallet_backup_";
 
@@ -30,10 +30,26 @@ export interface CachedBackup {
   version: string;
 }
 
+/**
+ * The single rule for a backup's version: the server's `backup_version` when it provides one,
+ * otherwise the serialized blob string. `unlockWallet` compares against this value.
+ */
+export function versionOf(remote: {
+  backup_version?: string | null;
+  encrypted_backup?: string | null;
+}): string {
+  return remote.backup_version ?? remote.encrypted_backup ?? "";
+}
+
+/**
+ * Import policy: a backup imported from a file is local-only (it is not uploaded) and is stamped
+ * with its own serialized form as the version. Callers that know the server's version pass it
+ * explicitly; the default never produces an empty version.
+ */
 export function saveLocalBackup(
   walletId: string,
   backup: EncryptedBackup,
-  version: string = "",
+  version: string = serializeBackup(backup),
 ): boolean {
   if (typeof window === "undefined") return false;
   try {

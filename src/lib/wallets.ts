@@ -6,7 +6,6 @@ import { apiFetch, path } from "./api";
 import { parseAmount, toApiStroops } from "./amount";
 import { pageQuery, type Paginated, type PageOpts } from "./pagination";
 import { fetchAllPages } from "./csv";
-import { network } from "./network";
 export { usdcForNetwork } from "./network";
 
 export type { Paginated, PageOpts } from "./pagination";
@@ -18,6 +17,7 @@ export type CreateWalletResponse = {
   address: string;
   custody: string;
   funded: boolean;
+  backup_version?: string | null;
 };
 
 export type WalletView = {

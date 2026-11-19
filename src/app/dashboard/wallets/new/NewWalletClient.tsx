@@ -172,7 +172,7 @@ export function NewWalletClient() {
         description: pending.description,
         idempotencyKey: pending.idempotencyKey,
       });
-      const cached = saveLocalBackup(wallet.id, pending.backup);
+      const cached = saveLocalBackup(wallet.id, pending.backup, wallet.backup_version ?? encryptedBackup);
       if (!cached) {
         setBackupWarning(
           "Your wallet was created, but this browser could not cache its encrypted backup. Keep your password and recovery phrase safe; Octo will provide the backup when you unlock this wallet.",

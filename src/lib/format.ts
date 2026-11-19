@@ -1,5 +1,7 @@
 /** Display helpers that more than one page or component needs. */
 
+import { network } from "@/lib/network";
+
 /** Public checkout URL for a payment link slug. Falls back to a path during SSR. */
 export function payUrl(slug: string): string {
   if (typeof window === "undefined") return `/pay/${slug}`;
@@ -19,4 +21,17 @@ export function formatCountdownMs(ms: number): string {
 /** Countdown from seconds as minutes and seconds. */
 export function formatCountdownSeconds(seconds: number): string {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+/** Shorten a transaction hash to `ABCD…WXYZ` for display. */
+export function shortenTxHash(hash: string): string {
+  const trimmed = hash.trim();
+  if (trimmed.length <= 12) return trimmed;
+  return `${trimmed.slice(0, 4)}…${trimmed.slice(-4)}`;
+}
+
+/** Stellar Expert transaction URL for the current network. */
+export function explorerTxUrl(hash: string): string {
+  const net = network === "mainnet" ? "public" : "testnet";
+  return `https://stellar.expert/explorer/${net}/tx/${encodeURIComponent(hash.trim())}`;
 }

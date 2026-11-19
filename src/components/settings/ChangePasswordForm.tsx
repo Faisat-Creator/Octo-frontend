@@ -5,7 +5,6 @@ import { toast } from "sonner";
 import { errorMessage } from "@/lib/api";
 import { changePassword, MIN_ACCOUNT_PASSWORD_LENGTH } from "@/lib/passwordApi";
 import { assessPassword, MIN_PASSWORD_SCORE } from "@/lib/passwordStrength";
-import { PasswordStrengthMeter } from "@/lib/passwordStrength";
 
 const inputClass =
   "mt-2 w-full rounded-xl border border-border bg-surface-raised px-4 py-3 text-sm text-foreground placeholder:text-muted/60 focus:border-burgundy-bright focus:outline-none";

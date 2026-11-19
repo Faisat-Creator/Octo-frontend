@@ -174,7 +174,7 @@ export default function DevelopersPage({
                         >
                           {revealed ? "🙈" : "👁"}
                         </button>
-                        <CopyButton value={fullKey} />
+                        <CopyButton value={fullKey} sensitive />
                       </>
                     )}
                   </div>

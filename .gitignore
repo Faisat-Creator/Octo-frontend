@@ -48,3 +48,6 @@ next-env.d.ts
 
 # generated email previews
 /emails-export/
+# pnpm is the only supported package manager
+package-lock.json
+yarn.lock

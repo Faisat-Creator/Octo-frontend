@@ -3,7 +3,7 @@
 import { errorMessage } from "@/lib/api";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
-import { getBackup, loadLocalBackup, parseBackup, saveLocalBackup, decryptSeed, fromMnemonic } from "@/lib/sdk";
+import { getBackup, loadLocalBackup, parseBackup, serializeBackup, saveLocalBackup, decryptSeed, fromMnemonic } from "@/lib/sdk";
 import { downloadBlob } from "@/lib/csv";
 import { PasswordPromptModal } from "@/components/backup/PasswordPromptModal";
 
@@ -30,7 +30,7 @@ export function DownloadBackupButton({
     if (address && keypair.publicKey() !== address) {
       throw new Error("This backup does not belong to this wallet.");
     }
-    saveLocalBackup(walletId, pending);
+    saveLocalBackup(walletId, pending, serializeBackup(pending));
     setPending(null);
     toast.success("Backup imported. Unlock with your wallet password to use it.");
   }

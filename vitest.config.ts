@@ -9,14 +9,23 @@ export default defineConfig({
   test: {
     coverage: {
       provider: "v8",
-      include: ["src/lib/sdk/**/*.ts"],
+      include: ["src/lib/**/*.ts", "src/proxy.ts"],
+      exclude: ["**/*.test.ts", "src/lib/**/use*.ts", "src/lib/**/use*.tsx"],
       all: true,
       reporter: ["text", "text-summary", "html"],
       thresholds: {
-        branches: 85,
-        functions: 90,
-        lines: 90,
-        statements: 90,
+        // Baseline for all non-UI src/lib modules and proxy.ts; raise as coverage grows.
+        branches: 50,
+        functions: 50,
+        lines: 50,
+        statements: 50,
+        // The SDK keeps its stricter thresholds.
+        "src/lib/sdk/**": {
+          branches: 85,
+          functions: 90,
+          lines: 90,
+          statements: 90,
+        },
       },
     },
   },

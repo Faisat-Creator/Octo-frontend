@@ -5,7 +5,6 @@ import Link from "next/link";
 import { ApiError, errorMessage } from "@/lib/api";
 import { requestPasswordReset, resetPassword, MIN_ACCOUNT_PASSWORD_LENGTH } from "@/lib/passwordApi";
 import { assessPassword, MIN_PASSWORD_SCORE } from "@/lib/passwordStrength";
-import { PasswordStrengthMeter } from "@/lib/passwordStrength";
 import { OtpInput } from "./OtpInput";
 
 type Step = "email" | "code" | "password" | "done";

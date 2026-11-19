@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseBackup } from './crypto';
+import { decryptSeed, encryptSeed, parseBackup, WrongPasswordError, type EncryptedBackup } from './crypto';
 
 const VALID_SALT = new Uint8Array(16).fill(1);
 const VALID_NONCE = new Uint8Array(12).fill(2);
@@ -49,5 +49,33 @@ describe('parseBackup', () => {
 
   it('rejects a nonce that is not 12 bytes', () => {
     expect(() => parseBackup(makeBackup({ nonce: toBase64(new Uint8Array(11)) }))).toThrow();
+  });
+});
+
+describe('decryptSeed parameter validation', () => {
+  const make = (o: Record<string, unknown> = {}) =>
+    ({ ...JSON.parse(makeBackup()), ...o }) as EncryptedBackup;
+
+  it('rejects out-of-range iter before touching WebCrypto', async () => {
+    await expect(decryptSeed(make({ iter: 2_000_000_000 }), 'pw')).rejects.toThrow();
+    await expect(decryptSeed(make({ iter: 1 }), 'pw')).rejects.toThrow();
+  });
+
+  it('rejects a bad salt length', async () => {
+    await expect(decryptSeed(make({ salt: toBase64(new Uint8Array(8)) }), 'pw')).rejects.toThrow();
+  });
+
+  it('rejects an empty or oversized ciphertext', async () => {
+    await expect(decryptSeed(make({ ciphertext: '' }), 'pw')).rejects.toThrow();
+    await expect(
+      decryptSeed(make({ ciphertext: toBase64(new Uint8Array(4096)) }), 'pw'),
+    ).rejects.toThrow();
+  });
+});
+
+describe('WrongPasswordError', () => {
+  it('is thrown by decryptSeed for a wrong password', async () => {
+    const backup = await encryptSeed('some mnemonic words', 'right-password');
+    await expect(decryptSeed(backup, 'wrong-password')).rejects.toBeInstanceOf(WrongPasswordError);
   });
 });

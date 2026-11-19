@@ -5,8 +5,8 @@ import Link from "next/link";
 import { toast } from "sonner";
 import { signup, login, verifyEmail, resendOtp, needsVerification, needsTwoFactor, saveToken, verify2fa } from "@/lib/auth";
 import { errorMessage } from "@/lib/api";
+import { safeNextPath } from "@/lib/safeNext";
 import { assessPassword, MIN_PASSWORD_SCORE } from "@/lib/passwordStrength";
-import { PasswordStrengthMeter } from "@/lib/passwordStrength";
 import { OtpInput } from "./OtpInput";
 
 type Mode = "signup" | "login";
@@ -43,7 +43,7 @@ export function AuthForm({
     // Hard navigation so the dashboard mounts fresh with the token already in
     // localStorage (avoids a client-router race that can bounce back to /login).
     // Redirect to the page the user was on before session expiry, or the dashboard.
-    window.location.assign(next ?? "/dashboard");
+    window.location.assign(safeNextPath(next) ?? "/dashboard");
   }
 
   function startCooldown() {

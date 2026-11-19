@@ -74,3 +74,17 @@ needed, delete it — version control remembers it.
 - Link related issues.
 - Ensure the CI commands above pass locally.
 - Respond to review feedback promptly.
+## Dependencies
+
+CI runs `pnpm audit --prod --audit-level=high` and fails on high or critical
+advisories in production dependencies. If it fails, upgrade the affected
+package or add a pnpm override. If neither is possible, record a documented
+ignore (advisory link plus an expiry date) in `pnpm-workspace.yaml` and remove
+it once the fix lands.
+
+## Coverage thresholds
+
+Coverage covers all non-UI `src/lib` modules and `src/proxy.ts` (baseline 50%
+for branches, functions, lines and statements). `src/lib/sdk/**` keeps stricter
+thresholds (85% branches, 90% functions, lines and statements). CI fails if
+either is breached.

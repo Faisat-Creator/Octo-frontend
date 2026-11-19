@@ -11,7 +11,7 @@
 export { generateWallet, fromMnemonic, keypairFromRawSeed } from "./keys";
 export type { WalletKeys } from "./keys";
 
-export { encryptSeed, decryptSeed, serializeBackup, parseBackup } from "./crypto";
+export { encryptSeed, decryptSeed, serializeBackup, parseBackup, WrongPasswordError } from "./crypto";
 export type { EncryptedBackup } from "./crypto";
 
 export {
@@ -36,9 +36,9 @@ export {
 } from "./client";
 export type { SubmitResult } from "./client";
 
-export { saveLocalBackup, loadLocalBackup, clearLocalBackups } from "./store";
+export { saveLocalBackup, loadLocalBackup, clearLocalBackups, versionOf } from "./store";
 
-export { unlockWallet } from "./unlock";
+export { unlockWallet, unlockBackup } from "./unlock";
 
 export { MIN_FEE_STROOPS, MAX_FEE_STROOPS, validateFee, getFeeStroops } from "./tx";
 export { assertNetworkConsistency, isConfiguredNetwork } from "./network";

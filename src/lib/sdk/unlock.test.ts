@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { MISSING_BACKUP_ERROR, unlockWallet } from "./unlock";
+import { MISSING_BACKUP_ERROR, unlockBackup, unlockWallet } from "./unlock";
 import { getBackup } from "./client";
 import { encryptSeed, serializeBackup, type EncryptedBackup } from "./crypto";
 import { loadLocalBackup, saveLocalBackup } from "./store";
@@ -150,5 +150,16 @@ describe("unlockWallet", () => {
     });
     await expect(unlockWallet(TOKEN, WALLET_ID, TEST_PASSWORD)).rejects.toThrow();
     expect(loadLocalBackup(WALLET_ID)).toBeNull();
+  });
+
+  it("unlockBackup rejects a cached backup that belongs to another wallet", async () => {
+    saveLocalBackup(WALLET_ID, validBackupObj, "v1");
+    const other = fromMnemonic(
+      "legal winner thank year wave sausage worth useful legal winner thank yellow",
+    ).publicKey;
+    await expect(unlockBackup(TOKEN, WALLET_ID, TEST_PASSWORD, other)).rejects.toThrow(
+      /does not match this wallet/,
+    );
+    expect(getBackup).not.toHaveBeenCalled();
   });
 });

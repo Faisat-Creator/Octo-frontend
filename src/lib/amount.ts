@@ -10,6 +10,19 @@ export const STROOPS_PER_UNIT = BigInt(10_000_000);
 const INT64_MAX = BigInt("9223372036854775807");
 const ZERO = BigInt(0);
 
+/**
+ * Default minimum for flexible-amount payment links, in whole USDC.
+ *
+ * Dust intents (down to 1 stroop) clutter the merchant's payment list, cost the payer a network
+ * fee worth more than the payment, and can be used to spam a link. The backend must enforce the
+ * same limit; this constant is only the client-side UX default and is used when a link does not
+ * provide its own `min_amount_usdc_stroops`.
+ */
+export const MIN_FLEXIBLE_USD = 0.01;
+
+/** Default minimum for flexible-amount links, in stroops (derived from `MIN_FLEXIBLE_USD`). */
+export const MIN_FLEXIBLE_STROOPS = BigInt(Math.round(MIN_FLEXIBLE_USD * 10 ** STELLAR_DECIMALS));
+
 export type ParsedAmount =
   | { ok: true; stroops: bigint }
   | { ok: false; error: string };
@@ -81,4 +94,34 @@ export function sumStroops(values: Iterable<bigint | number | string>): bigint {
   let total = ZERO;
   for (const v of values) total += toStroopBigInt(v);
   return total;
+}
+
+/**
+ * Validate a flexible-amount payment against the link's min/max bounds (in stroops).
+ *
+ * Returns a user-facing error message when the amount is below `minStroops` or above
+ * `maxStroops` (when a maximum is set), or `null` when the amount is acceptable. The client
+ * check is UX only; the backend must enforce the same limits.
+ */
+export function validateFlexibleAmount(
+  stroops: number,
+  minStroops: number,
+  maxStroops: number | null,
+): string | null {
+  if (!Number.isFinite(stroops) || !Number.isInteger(stroops)) {
+    return "Enter a valid amount.";
+  }
+  if (!Number.isFinite(minStroops) || !Number.isInteger(minStroops)) {
+    throw new RangeError(`Invalid minimum stroop value: ${minStroops}`);
+  }
+  if (maxStroops !== null && (!Number.isFinite(maxStroops) || !Number.isInteger(maxStroops))) {
+    throw new RangeError(`Invalid maximum stroop value: ${maxStroops}`);
+  }
+  if (stroops < minStroops) {
+    return `Enter at least $${formatStroops(minStroops, 2)}.`;
+  }
+  if (maxStroops !== null && stroops > maxStroops) {
+    return `Enter at most $${formatStroops(maxStroops, 2)}.`;
+  }
+  return null;
 }
