@@ -5,6 +5,7 @@ import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { getBackup, loadLocalBackup, parseBackup, saveLocalBackup, decryptSeed, fromMnemonic } from "@/lib/sdk";
 import { downloadBlob } from "@/lib/csv";
+import { PasswordPromptModal } from "@/components/backup/PasswordPromptModal";
 
 /** Export the encrypted backup as a .json file, or re-import one into this browser. */
 export function DownloadBackupButton({
@@ -18,6 +19,21 @@ export function DownloadBackupButton({
 }) {
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const [pending, setPending] = useState<ReturnType<typeof parseBackup> | null>(null);
+
+  // Validate the backup is usable and bound to this wallet: decrypt with the user's password
+  // and confirm the derived key matches the wallet address.
+  async function confirmImport(password: string) {
+    if (!pending) return;
+    const mnemonic = await decryptSeed(pending, password);
+    const keypair = fromMnemonic(mnemonic).keypair;
+    if (address && keypair.publicKey() !== address) {
+      throw new Error("This backup does not belong to this wallet.");
+    }
+    saveLocalBackup(walletId, pending);
+    setPending(null);
+    toast.success("Backup imported. Unlock with your wallet password to use it.");
+  }
 
   async function download() {
     setBusy(true);
@@ -57,23 +73,8 @@ export function DownloadBackupButton({
       const blob = parsed?.backup ?? parsed;
       const backup = parseBackup(JSON.stringify(blob));
 
-      // Confirm before replacing an existing local backup for this wallet.
-      if (loadLocalBackup(walletId) && !window.confirm("A local backup already exists for this wallet. Replace it?")) {
-        return;
-      }
-
-      // Validate the backup is usable and bound to this wallet: decrypt with the user's password
-      // and confirm the derived key matches the wallet address.
-      const password = window.prompt("Enter your wallet password to confirm this backup is yours.");
-      if (password === null) return;
-      const mnemonic = await decryptSeed(backup, password);
-      const keypair = fromMnemonic(mnemonic).keypair;
-      if (address && keypair.publicKey() !== address) {
-        throw new Error("This backup does not belong to this wallet.");
-      }
-
-      saveLocalBackup(walletId, backup);
-      toast.success("Backup imported. Unlock with your wallet password to use it.");
+      // Ask for the password (masked) in a modal; the overwrite question is shown there too.
+      setPending(backup);
     } catch (err) {
       toast.error(errorMessage(err, "Could not import the backup file."));
     }
@@ -102,6 +103,18 @@ export function DownloadBackupButton({
         The file is encrypted and useless without your wallet password. Keep both safe; we cannot
         recover them for you.
       </p>
+      {pending && (
+        <PasswordPromptModal
+          title="Import backup"
+          description={
+            (loadLocalBackup(walletId) ? "A local backup already exists for this wallet and will be replaced. " : "") +
+            "Enter your wallet password to confirm this backup is yours."
+          }
+          submitLabel="Import"
+          onSubmit={confirmImport}
+          onClose={() => setPending(null)}
+        />
+      )}
     </div>
   );
 }
