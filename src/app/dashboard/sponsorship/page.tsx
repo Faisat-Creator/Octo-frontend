@@ -29,7 +29,6 @@ export default function SponsorshipPage() {
   const loadData = useCallback(
     (signal?: AbortSignal) => {
     if (!token) return;
-    setLoadError(null);
     listAllWallets(token)
       .then(async (wallets) => {
         // Only the sponsorship config is fetched per wallet — not full wallet details.
@@ -51,7 +50,10 @@ export default function SponsorshipPage() {
         signal?.throwIfAborted();
         return wallets.map((wallet, i) => ({ wallet, config: configs[i] ?? null }));
       })
-      .then(setRows)
+      .then((r) => {
+        setLoadError(null);
+        setRows(r);
+      })
       .catch((e) => {
         if (e instanceof DOMException && e.name === "AbortError") return;
         setRows([]);
