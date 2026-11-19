@@ -25,11 +25,13 @@ import { friendlyResultMessage, isExpiredResult } from "@/lib/stellar/resultCode
 export function TrustlineModal({
   token,
   walletId,
+  walletAddress,
   onClose,
   onDone,
 }: {
   token: string;
   walletId: string;
+  walletAddress: string;
   onClose: () => void;
   onDone: () => void;
 }) {
@@ -52,7 +54,7 @@ export function TrustlineModal({
     try {
       // Unlock the key locally (decrypt with password), build + sign the ChangeTrust in the
       // browser, then relay the signed XDR. The private key never leaves this device.
-      const keypair = await unlockWallet(token, walletId, password);
+      const keypair = await unlockWallet(token, walletId, password, walletAddress);
       const info = await getSigningInfo(token, walletId);
       const usdc = usdcForNetwork(info.network_passphrase);
       const signedXdr = buildSignedChangeTrust(keypair, info, {
