@@ -454,10 +454,11 @@ export default function WalletOverview({
           }}
         />
       )}
-      {showTrustline && token && (
+      {showTrustline && token && wallet?.address && (
         <TrustlineModal
           token={token}
           walletId={id}
+          walletAddress={wallet.address}
           onClose={() => setShowTrustline(false)}
           onDone={() => {
             setShowTrustline(false);
