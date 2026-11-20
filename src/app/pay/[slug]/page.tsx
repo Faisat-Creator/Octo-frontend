@@ -34,6 +34,15 @@ import { formatCountdownMs } from "@/lib/format";
 
 type Step = "loading" | "not-found" | "error" | "form" | "pay" | "confirmed";
 
+/** How long the confirmed page waits before sending the payer back to the merchant. */
+const REDIRECT_DELAY_MS = 2_000;
+
+/** Slower status cadence while the payer is back on the form step. */
+const FORM_POLL_MS = 8_000;
+
+/** Relay timeout for a Freighter submit; relaying to Horizon and waiting for inclusion is slow. */
+const SUBMIT_TIMEOUT_MS = 60_000;
+
 /** Keep the loading spinner up for at least this long so it doesn't just flash on fast loads. */
 const MIN_LOADING_MS = 700;
 
@@ -96,6 +105,18 @@ function buildMerchantReturnUrl(redirectUrl: string, paymentId: string, slugValu
 // A Stellar transaction hash is 64 hex characters; anything else is an internal reference.
 function isStellarTxHash(value: string | null | undefined): value is string {
   return typeof value === "string" && /^[0-9a-fA-F]{64}$/.test(value);
+}
+
+// Extracts the transaction hash from a signed envelope XDR, or null when it can't be parsed.
+function signedTxHashOf(signedXdr: string): string | null {
+  try {
+    // Imported lazily to keep the Stellar SDK out of the initial bundle.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { TransactionBuilder } = require("@stellar/stellar-sdk") as typeof import("@stellar/stellar-sdk");
+    return TransactionBuilder.fromXDR(signedXdr, network.passphrase).hash().toString("hex");
+  } catch {
+    return null;
+  }
 }
 
 // Shortens a hash for display while keeping the head and tail recognizable.
@@ -171,23 +192,42 @@ export default function PayPage({
   const [returnUrl, setReturnUrl] = useState<string | null>(null);
   // Field-level validation flags driving aria-invalid on the checkout inputs.
   const [nameInvalid, setNameInvalid] = useState(false);
-  const [emailInvalid, setEmailInvalid] = useState(false);
   // Normalized flexible amount, computed once per render so the header and pay step agree.
   const parsed = parseAmount(amount);
+  // Hash of the last signed Freighter transaction, so the payer can look it up themselves.
+  const [signedTxHash, setSignedTxHash] = useState<string | null>(null);
+  // True while a timed-out submit is being reconciled against the payment status.
+  const [stillConfirming, setStillConfirming] = useState(false);
+  // Pending "start over" confirmation after the deposit address was already shown.
+  const [restartPrompt, setRestartPrompt] = useState<{
+    amountUsdcStroops: number;
+    key: string;
+  } | null>(null);
+  // Previous intent the payer may already have paid, kept so its status stays checkable.
+  const [previousIntent, setPreviousIntent] = useState<PaymentIntent | null>(null);
+  // Timer for the post-confirmation redirect, cleared on unmount.
+  const redirectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Signed XDR hash kept in a ref so async callbacks can read it without re-rendering.
+  const signedTxHashRef = useRef<string | null>(null);
 
   useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     setStep("loading");
     const startedAt = Date.now();
     const finish = (next: Step) => {
       const remaining = MIN_LOADING_MS - (Date.now() - startedAt);
       if (remaining > 0) {
-        setTimeout(() => setStep(next), remaining);
-      } else {
+        timer = setTimeout(() => {
+          if (active) setStep(next);
+        }, remaining);
+      } else if (active) {
         setStep(next);
       }
     };
     getPublicPaymentLink(slug)
       .then((l) => {
+        if (!active) return;
         setLink(l);
         if (l.amount_usdc_stroops !== null) {
           setAmount(formatStroops(l.amount_usdc_stroops));
@@ -195,10 +235,25 @@ export default function PayPage({
         finish("form");
       })
       .catch((err: unknown) => {
+        if (!active) return;
         const gone = err instanceof ApiError && (err.status === 404 || err.status === 410);
         finish(gone ? "not-found" : "error");
       });
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
   }, [slug, attempt]);
+
+  // Clears the post-confirmation redirect timer if the payer leaves before it fires.
+  useEffect(() => {
+    return () => {
+      if (redirectTimerRef.current !== null) {
+        clearTimeout(redirectTimerRef.current);
+        redirectTimerRef.current = null;
+      }
+    };
+  }, []);
 
   // Swaps the active intent, resetting everything that belonged to the previous one.
   function replaceIntent(next: PaymentIntent | null, key = "") {
@@ -207,9 +262,21 @@ export default function PayPage({
     setResolvedStatus(null);
     setPollStopped(false);
     setCheckMessage(null);
+    setStillConfirming(false);
+    signedTxHashRef.current = null;
+    setSignedTxHash(null);
     // Restart the countdown clock for the new intent (or clear it when there is none).
     setNow(next?.expires_at ? Date.now() : null);
   }
+
+  // Schedules the merchant redirect; the timer ID is kept so unmount can cancel it.
+  const redirectAfterConfirm = useCallback((url: string) => {
+    if (redirectTimerRef.current !== null) clearTimeout(redirectTimerRef.current);
+    redirectTimerRef.current = setTimeout(() => {
+      redirectTimerRef.current = null;
+      window.location.href = url;
+    }, REDIRECT_DELAY_MS);
+  }, []);
 
   // The single path for every confirmation source (poll, check-now, Freighter).
   const markConfirmed = useCallback(
@@ -218,11 +285,13 @@ export default function PayPage({
       confirmedRef.current = true;
       setTxRef(txReference);
       setConfirmedAmountStroops(amountStroops);
-      setReturnUrl(link?.redirect_url ? buildMerchantReturnUrl(link.redirect_url, paymentId, slug) : null);
+      const url = link?.redirect_url ? buildMerchantReturnUrl(link.redirect_url, paymentId, slug) : null;
+      setReturnUrl(url);
       setStep("confirmed");
       celebrate();
+      if (url) redirectAfterConfirm(url);
     },
-    [link, slug],
+    [link, slug, redirectAfterConfirm],
   );
 
   // Handles a status response for `paymentId`; returns true once resolved. Stale intents are ignored.
@@ -267,13 +336,16 @@ export default function PayPage({
   }, [hasExpiry, hasNow, isExpired]);
 
   // Polls for confirmation with backoff; pauses while hidden or a Freighter submit is in flight.
+  // Keeps running on the form step (slower) so a payment made just before "Back" is still seen.
   useEffect(() => {
-    if (!intent || step !== "pay" || resolvedStatus || pollStopped || freighterBusy) return;
+    const watching = step === "pay" || step === "form";
+    if (!intent || !watching || resolvedStatus || pollStopped || freighterBusy) return;
     const paymentId = intent.payment_id;
     const createdAt = intentRef.current?.createdAt ?? Date.now();
     const expiresAt = intent.expires_at ? Date.parse(intent.expires_at) : NaN;
     const hasExpiry = Number.isFinite(expiresAt);
     const stopAt = hasExpiry ? expiresAt : createdAt + MAX_POLL_MS;
+    const onForm = step === "form";
     let timer: ReturnType<typeof setTimeout> | undefined;
     let inFlight = false;
     let cancelled = false;
@@ -297,7 +369,8 @@ export default function PayPage({
     const schedule = () => {
       if (cancelled || hidden()) return;
       const now = Date.now();
-      const delay = Math.min(pollDelayMs(now - createdAt), Math.max(0, stopAt - now));
+      const base = onForm ? FORM_POLL_MS : pollDelayMs(now - createdAt);
+      const delay = Math.min(base, Math.max(0, stopAt - now));
       timer = setTimeout(tick, delay);
     };
 
@@ -340,7 +413,7 @@ export default function PayPage({
 
   // Flips the UI to the expired state the moment the countdown hits zero.
   useEffect(() => {
-    if (!intent || step !== "pay" || resolvedStatus || !isExpired) return;
+    if (!intent || (step !== "pay" && step !== "form") || resolvedStatus || !isExpired) return;
     setResolvedStatus({
       status: "expired",
       transaction_id: null,
@@ -415,18 +488,71 @@ export default function PayPage({
         setStep("pay");
         return;
       }
-      replaceIntent(null);
-      const created = await createPaymentIntent(slug, {
-        payerName: payerName.trim() || undefined,
-        payerEmail: payerEmail.trim() || undefined,
-        amountUsdcStroops,
-      });
-      replaceIntent(created, key);
-      setStep("pay");
+      // The payer may already have sent funds to the previous address — confirm before replacing it.
+      if (intentRef.current) {
+        setRestartPrompt({ amountUsdcStroops, key });
+        return;
+      }
+      await startNewIntent(amountUsdcStroops, key);
     } catch (err) {
       setError(errorMessage(err, "Could not start this payment."));
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  // Creates a fresh intent, keeping the previous one around so its status stays checkable.
+  async function startNewIntent(amountUsdcStroops: number, key: string) {
+    const previous = intentRef.current?.intent ?? null;
+    if (previous) setPreviousIntent(previous);
+    replaceIntent(null);
+    const created = await createPaymentIntent(slug, {
+      payerName: payerName.trim() || undefined,
+      payerEmail: payerEmail.trim() || undefined,
+      amountUsdcStroops,
+    });
+    replaceIntent(created, key);
+    setStep("pay");
+  }
+
+  // Confirms the "start over" prompt: the payer accepts a new deposit address.
+  async function handleConfirmRestart() {
+    if (!restartPrompt) return;
+    const { amountUsdcStroops, key } = restartPrompt;
+    setRestartPrompt(null);
+    setSubmitting(true);
+    setError(null);
+    try {
+      await startNewIntent(amountUsdcStroops, key);
+    } catch (err) {
+      setError(errorMessage(err, "Could not start this payment."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  // Dismisses the prompt and checks the previous intent's status instead of starting over.
+  async function handleCheckPrevious() {
+    const previous = intentRef.current?.intent ?? previousIntent;
+    setRestartPrompt(null);
+    if (!previous) return;
+    setChecking(true);
+    setCheckMessage(null);
+    try {
+      const status = await getPaymentStatus(slug, previous.payment_id);
+      if (status.status === "confirmed") {
+        markConfirmed(previous.payment_id, status.transaction_id, previous.amount_usdc_stroops);
+        return;
+      }
+      setCheckMessage(
+        status.status === "pending"
+          ? "We haven't received a payment to the previous address yet. This page keeps checking automatically."
+          : `The previous payment is ${status.status}.`,
+      );
+    } catch {
+      setCheckMessage("Could not check the previous payment. Try again in a moment.");
+    } finally {
+      setChecking(false);
     }
   }
 
@@ -472,7 +598,14 @@ export default function PayPage({
       }
       assertSignedMatchesBuilt(unsignedXdr, signed.signedTxXdr, info.network_passphrase);
 
-      const result = await submitPublicPayment(slug, signed.signedTxXdr, intent.payment_id);
+      // Keep the signed hash so the payer can look the transaction up themselves.
+      const hash = signedTxHashOf(signed.signedTxXdr);
+      signedTxHashRef.current = hash;
+      setSignedTxHash(hash);
+
+      const result = await submitPublicPayment(slug, signed.signedTxXdr, intent.payment_id, {
+        timeoutMs: SUBMIT_TIMEOUT_MS,
+      });
       if (result.status === "confirmed") {
         markConfirmed(intent.payment_id, result.stellar_tx_hash ?? null, intent.amount_usdc_stroops);
         return;
@@ -481,10 +614,35 @@ export default function PayPage({
         friendlyResultMessage(result.detail, "The payment could not be confirmed on-chain."),
       );
     } catch (err) {
-      setError(errorMessage(err, "Freighter payment failed."));
+      // A timeout or network error doesn't mean the payment failed — reconcile before re-signing.
+      const reconciled = await reconcileAfterSubmitError(intent);
+      if (!reconciled) {
+        setError(errorMessage(err, "Freighter payment failed."));
+      }
     } finally {
       setFreighterBusy(false);
     }
+  }
+
+  // Checks the intent's status after a submit error. Returns true when the UI is handled
+  // (confirmed, or still confirming) and signing must not be offered again.
+  async function reconcileAfterSubmitError(current: PaymentIntent): Promise<boolean> {
+    try {
+      const status = await getPaymentStatus(slug, current.payment_id);
+      if (status.status === "confirmed") {
+        markConfirmed(current.payment_id, status.transaction_id, current.amount_usdc_stroops);
+        return true;
+      }
+      if (status.status === "pending") {
+        // The earlier signed transaction may still land — keep polling instead of re-signing.
+        setStillConfirming(true);
+        setError(null);
+        return true;
+      }
+    } catch {
+      // Couldn't reach the API — fall through to the generic error so the payer can retry.
+    }
+    return false;
   }
 
   // Inline validation for the flexible amount input.
@@ -641,11 +799,59 @@ export default function PayPage({
                 <PayerPrivacyNotice merchantName={link.name} />
               </div>
 
+              {restartPrompt && (
+                <div
+                  role="alertdialog"
+                  aria-labelledby="restart-title"
+                  className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-3 text-xs text-amber-800"
+                >
+                  <p id="restart-title" className="font-medium">
+                    You may already have sent a payment to the previous address. Starting over
+                    creates a new payment address.
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={handleCheckPrevious}
+                      disabled={checking}
+                      className="flex items-center gap-2 rounded-lg bg-black px-3 py-1.5 font-medium text-white hover:opacity-90 disabled:opacity-50"
+                    >
+                      {checking && <OctoSpinner size={12} className="text-white" />}
+                      Check status first
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleConfirmRestart}
+                      disabled={submitting}
+                      className="rounded-lg border border-amber-400 px-3 py-1.5 font-medium text-amber-800 hover:border-amber-600 disabled:opacity-50"
+                    >
+                      Start over
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {previousIntent && (
+                <p className="text-[11px] text-gray-500">
+                  Already paid the previous address?{" "}
+                  <button
+                    type="button"
+                    onClick={handleCheckPrevious}
+                    disabled={checking}
+                    className="font-medium text-gray-900 underline hover:no-underline disabled:opacity-50"
+                  >
+                    Check its status
+                  </button>
+                </p>
+              )}
+
+              {checkMessage && <p className="text-[11px] text-gray-500">{checkMessage}</p>}
+
               {error && <ErrorBanner id="payer-error" message={error} />}
 
               <button
                 type="submit"
-                disabled={submitting}
+                disabled={submitting || restartPrompt !== null}
                 className="flex w-full items-center justify-center gap-2 rounded-lg bg-black py-2.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
               >
                 {submitting && <OctoSpinner size={16} className="text-white" />}
@@ -737,6 +943,7 @@ export default function PayPage({
                       amount: formatStroops(intent.amount_usdc_stroops),
                       assetCode: network.usdc.code,
                       assetIssuer: network.usdc.issuer,
+                      networkPassphrase: network.passphrase,
                     })}
                     label="Scan with a Stellar wallet to pay the exact amount"
                   />
@@ -770,15 +977,44 @@ export default function PayPage({
               {!isExpired && (
               <div>
                 <p className="text-sm font-medium text-gray-900">Connect Wallet</p>
-                <button
-                  type="button"
-                  onClick={handleFreighterPay}
-                  disabled={freighterBusy}
-                  className="mt-2 flex w-full items-center justify-center gap-2 rounded-lg border border-gray-300 py-2.5 text-sm font-medium text-gray-900 transition-colors hover:border-black disabled:opacity-50"
-                >
-                  {freighterBusy && <OctoSpinner size={16} />}
-                  {freighterBusy ? "Connecting…" : "Connect Freighter"}
-                </button>
+                {stillConfirming ? (
+                  <div
+                    role="status"
+                    className="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-700"
+                  >
+                    <p>We&apos;re still confirming your payment…</p>
+                    <p className="mt-1">
+                      Don&apos;t send another payment — this page keeps checking automatically.
+                    </p>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleFreighterPay}
+                    disabled={freighterBusy}
+                    className="mt-2 flex w-full items-center justify-center gap-2 rounded-lg border border-gray-300 py-2.5 text-sm font-medium text-gray-900 transition-colors hover:border-black disabled:opacity-50"
+                  >
+                    {freighterBusy && <OctoSpinner size={16} />}
+                    {freighterBusy ? "Connecting…" : "Connect Freighter"}
+                  </button>
+                )}
+                {signedTxHash && (
+                  <p className="mt-2 text-[11px] text-gray-500">
+                    Signed transaction{" "}
+                    <span className="font-mono" title={signedTxHash}>
+                      {shortenHash(signedTxHash)}
+                    </span>{" "}
+                    ·{" "}
+                    <a
+                      href={explorerTxUrl(signedTxHash)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-medium text-gray-900 underline hover:no-underline"
+                    >
+                      View on Stellar Expert ↗
+                    </a>
+                  </p>
+                )}
               </div>
               )}
 
