@@ -90,6 +90,7 @@ function useAuthSession() {
   useEffect(() => {
     const startedAt = Date.now();
     let active = true;
+    let loadingTimer: ReturnType<typeof setTimeout> | undefined;
     const t = getToken();
     if (!t) {
       router.replace("/login");
@@ -120,13 +121,17 @@ function useAuthSession() {
         const elapsed = Date.now() - startedAt;
         const remaining = MIN_LOADING_MS - elapsed;
         if (remaining > 0) {
-          setTimeout(() => setLoading(false), remaining);
+          loadingTimer = setTimeout(() => {
+            if (!active) return;
+            setLoading(false);
+          }, remaining);
         } else {
           setLoading(false);
         }
       });
     return () => {
       active = false;
+      if (loadingTimer !== undefined) clearTimeout(loadingTimer);
     };
   }, [router, retryNonce]);
 

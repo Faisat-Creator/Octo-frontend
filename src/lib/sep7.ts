@@ -5,6 +5,9 @@ export function sep7PayUri(p: {
   assetCode?: string;
   assetIssuer?: string;
   memoId?: number | string;
+  memoType?: "MEMO_ID" | "MEMO_TEXT";
+  memo?: string;
+  networkPassphrase?: string;
 }): string {
   const q = new URLSearchParams({ destination: p.destination });
   if (p.amount) q.set("amount", p.amount);
@@ -12,9 +15,28 @@ export function sep7PayUri(p: {
     q.set("asset_code", p.assetCode);
     q.set("asset_issuer", p.assetIssuer);
   }
-  if (p.memoId !== undefined && p.memoId !== null && p.memoId !== "") {
-    q.set("memo", String(p.memoId));
-    q.set("memo_type", "MEMO_ID");
+
+  const memoType = p.memoType ?? (p.memoId !== undefined && p.memoId !== null && p.memoId !== "" ? "MEMO_ID" : undefined);
+  if (memoType === "MEMO_ID") {
+    const raw = p.memoId !== undefined && p.memoId !== null && p.memoId !== "" ? p.memoId : p.memo;
+    if (raw !== undefined && raw !== null && raw !== "") {
+      const memoStr = String(raw);
+      if (!/^\d+$/.test(memoStr)) {
+        throw new Error(`SEP-7 MEMO_ID must be a decimal string (uint64), got: ${memoStr}`);
+      }
+      q.set("memo", memoStr);
+      q.set("memo_type", "MEMO_ID");
+    }
+  } else if (memoType === "MEMO_TEXT") {
+    if (p.memo !== undefined && p.memo !== null && p.memo !== "") {
+      q.set("memo", p.memo);
+      q.set("memo_type", "MEMO_TEXT");
+    }
   }
+
+  if (p.networkPassphrase) {
+    q.set("network_passphrase", p.networkPassphrase);
+  }
+
   return `web+stellar:pay?${q.toString()}`;
 }

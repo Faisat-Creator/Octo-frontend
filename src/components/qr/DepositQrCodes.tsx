@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { sep7PayUri } from "@/lib/sep7";
+import { useNetwork } from "@/lib/network";
 import { AddressQrCode } from "./AddressQrCode";
 
 /** Toggle between a QR for the muxed address and one for the base address + memo. */
@@ -14,6 +15,7 @@ export function DepositQrCodes({
   baseAddress: string;
   memoId: number | string;
 }) {
+  const network = useNetwork();
   const [mode, setMode] = useState<"muxed" | "base">("muxed");
   const tab = (m: "muxed" | "base", text: string) => (
     <button
@@ -34,12 +36,19 @@ export function DepositQrCodes({
       </div>
       {mode === "muxed" ? (
         <AddressQrCode
-          value={sep7PayUri({ destination: muxedAddress })}
+          value={sep7PayUri({
+            destination: muxedAddress,
+            networkPassphrase: network.passphrase,
+          })}
           label="Scan to send to the muxed address"
         />
       ) : (
         <AddressQrCode
-          value={sep7PayUri({ destination: baseAddress, memoId })}
+          value={sep7PayUri({
+            destination: baseAddress,
+            memoId,
+            networkPassphrase: network.passphrase,
+          })}
           label={`Scan to send to the base address with memo ${memoId}`}
         />
       )}
