@@ -14,10 +14,20 @@ const ACTIVITY_EVENTS: (keyof WindowEventMap)[] = [
 
 export type IdleState = "active" | "warning" | "idle";
 
+export interface IdleTimerResult {
+  /** Current idle state. */
+  state: IdleState;
+  /** Milliseconds remaining until the idle callback fires. */
+  remainingMs: number;
+  /** Restart the warn/idle timers and return to the "active" state. */
+  reset: () => void;
+}
+
 /**
  * Tracks user inactivity and calls onIdle after `timeoutMs`.
- * Fires onWarn `warnBeforeMs` before the timeout so a lock-screen warning can be shown.
- * Returns the current idle state so callers can render a countdown banner.
+ * Fires onWarn `warnBeforeMs` before the timeout so a warning banner can be shown.
+ * Returns the current idle state, the remaining time, and a `reset` function so
+ * callers can render a live countdown and let the user extend the session.
  */
 export function useIdleTimer({
   timeoutMs,
@@ -31,13 +41,18 @@ export function useIdleTimer({
   onWarn: () => void;
   onIdle: () => void;
   enabled?: boolean;
-}): IdleState {
+}): IdleTimerResult {
   const [state, setState] = useState<IdleState>("active");
+  const [remainingMs, setRemainingMs] = useState(timeoutMs);
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const warnTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const countdownTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const deadlineRef = useRef<number>(0);
   // Keep latest callbacks in refs — updated inside effects to avoid stale closures in timers.
   const onWarnRef = useRef(onWarn);
   const onIdleRef = useRef(onIdle);
+  // Exposed reset function, kept in a ref so the effect can install it.
+  const resetRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     onWarnRef.current = onWarn;
@@ -53,21 +68,34 @@ export function useIdleTimer({
     function clearTimers() {
       if (idleTimer.current) clearTimeout(idleTimer.current);
       if (warnTimer.current) clearTimeout(warnTimer.current);
+      if (countdownTimer.current) clearInterval(countdownTimer.current);
+      idleTimer.current = null;
+      warnTimer.current = null;
+      countdownTimer.current = null;
     }
 
     function resetTimers() {
       clearTimers();
       setState("active");
+      deadlineRef.current = Date.now() + timeoutMs;
+      setRemainingMs(timeoutMs);
       warnTimer.current = setTimeout(() => {
         setState("warning");
         onWarnRef.current();
+        // Tick roughly once per second while warning is visible.
+        countdownTimer.current = setInterval(() => {
+          setRemainingMs(Math.max(0, deadlineRef.current - Date.now()));
+        }, 1000);
       }, timeoutMs - warnBeforeMs);
       idleTimer.current = setTimeout(() => {
+        clearTimers();
         setState("idle");
+        setRemainingMs(0);
         onIdleRef.current();
       }, timeoutMs);
     }
 
+    resetRef.current = resetTimers;
     resetTimers();
     ACTIVITY_EVENTS.forEach((ev) => window.addEventListener(ev, resetTimers, { passive: true }));
 
@@ -77,5 +105,9 @@ export function useIdleTimer({
     };
   }, [enabled, timeoutMs, warnBeforeMs]);
 
-  return state;
+  return {
+    state,
+    remainingMs,
+    reset: () => resetRef.current(),
+  };
 }

@@ -73,6 +73,26 @@ export async function me(token: string): Promise<User> {
   return apiFetch<User>("/v1/auth/me", { token });
 }
 
+/**
+ * Revoke the current session on the server so the bearer token stops working immediately.
+ * Fire-and-forget friendly: never throws, and accepts `keepalive` so the request can outlive
+ * a page unload/redirect. Callers should not await this before clearing local state.
+ */
+export async function logoutCurrentSession(
+  token: string,
+  opts: { keepalive?: boolean } = {},
+): Promise<void> {
+  try {
+    await apiFetch<void>("/v1/sessions/current", {
+      method: "DELETE",
+      token,
+      keepalive: opts.keepalive,
+    });
+  } catch {
+    // Best-effort: sign-out must still complete locally if the server call fails.
+  }
+}
+
 export const USERNAME_MIN = 3;
 export const USERNAME_MAX = 20;
 export const USERNAME_PATTERN = /^[A-Za-z0-9_-]+$/;
@@ -126,6 +146,9 @@ export function clearToken() {
  * Single sign-out helper: clears all local key backups then removes the session token.
  * Removing TOKEN_KEY fires a storage event that other tabs use to sign out in lock-step.
  * Always call this instead of clearToken() directly.
+ *
+ * This only clears local state; callers that want the server-side session revoked should
+ * fire logoutCurrentSession(token, { keepalive: true }) before calling this.
  */
 export function signOut() {
   if (typeof window === "undefined") return;

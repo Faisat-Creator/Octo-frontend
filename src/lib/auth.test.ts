@@ -80,6 +80,59 @@ describe("#285 signOut()", () => {
   });
 });
 
+// ---------- #643 — logoutCurrentSession() ----------
+
+describe("#643 logoutCurrentSession()", () => {
+  beforeEach(() => {
+    const storage = makeLocalStorage();
+    vi.stubGlobal("localStorage", storage);
+    vi.stubGlobal("window", { localStorage: storage });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  it("sends the bearer token with keepalive to the current-session revoke endpoint", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ statusCode: 200, message: "ok", data: null }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { logoutCurrentSession } = await import("./auth");
+    await logoutCurrentSession("tok-abc");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toMatch(/\/sessions\/current$/);
+    expect(init.method).toBe("DELETE");
+    expect(init.keepalive).toBe(true);
+    const headers = init.headers as Record<string, string>;
+    expect(headers["authorization"]).toBe("Bearer tok-abc");
+  });
+
+  it("resolves (does not reject) when the request fails at the network level", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("offline"); }));
+
+    const { logoutCurrentSession } = await import("./auth");
+    await expect(logoutCurrentSession("tok-abc")).resolves.toBeUndefined();
+  });
+
+  it("resolves (does not reject) when the server returns an error status", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: false,
+      status: 500,
+      json: async () => ({ statusCode: 500, message: "boom", data: null }),
+    })));
+
+    const { logoutCurrentSession } = await import("./auth");
+    await expect(logoutCurrentSession("tok-abc")).resolves.toBeUndefined();
+  });
+});
+
 // ---------- #286 — same-origin guard for ?next= ----------
 
 describe("#286 same-origin guard", () => {
