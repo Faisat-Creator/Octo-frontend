@@ -13,4 +13,8 @@ describe("safeNextPath", () => {
   it.each(["/dashboard", "/dashboard?x=1", "/dashboard#frag"])("allows %s", (v) =>
     expect(safeNextPath(v)).toBe(v),
   );
+  it("allows a path with both a query string and a hash", () => {
+    const next = "/dashboard/wallets/abc/transactions?before=xyz#top";
+    expect(safeNextPath(next)).toBe(next);
+  });
 });

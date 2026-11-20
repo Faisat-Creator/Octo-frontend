@@ -16,6 +16,7 @@ import { ApiError, errorMessage } from "./api";
 import {
   getToken,
   signOut,
+  logoutCurrentSession,
   me,
   broadcastLogout,
   subscribeToLogout,
@@ -46,16 +47,31 @@ function useAuthSession() {
   const signingOut = useRef(false);
 
   /** Redirect to /login?next=<current path> and wipe local state. */
-  function doSignOut(reason?: "expired") {
+  function doSignOut(reason?: "expired" | "remote") {
     if (signingOut.current) return;
     signingOut.current = true;
+    // Only an explicit logout revokes the session server-side. Expired tokens are
+    // already dead, and cross-tab sign-outs are handled by the tab that initiated them.
+    if (!reason) {
+      const currentToken = getToken();
+      if (currentToken) {
+        // Fire-and-forget with keepalive so sign-out still works offline / on unload.
+        logoutCurrentSession(currentToken).catch(() => {});
+      }
+    }
     signOut();
     // Notify other tabs so they sign out too (storage event is a fallback).
     broadcastLogout();
     setUser(null);
     setToken(null);
-    // Encode the current path so the user lands back here after re-login.
-    const next = encodeURIComponent(pathname ?? "/dashboard");
+    // Encode the current path (including query and hash) so the user lands back here after re-login.
+    let search = "";
+    let hash = "";
+    if (typeof window !== "undefined") {
+      search = window.location.search ?? "";
+      hash = window.location.hash ?? "";
+    }
+    const next = encodeURIComponent((pathname ?? "/dashboard") + search + hash);
     const query = reason === "expired" ? `?next=${next}&reason=expired` : `?next=${next}`;
     router.replace(`/login${query}`);
   }
@@ -68,7 +84,7 @@ function useAuthSession() {
 
   // The effects below read the latest sign-out and retry functions through effect events,
   // so each effect only re-runs when its own inputs change.
-  const onSignOut = useEffectEvent((reason?: "expired") => doSignOut(reason));
+  const onSignOut = useEffectEvent((reason?: "expired" | "remote") => doSignOut(reason));
   const onRetry = useEffectEvent(() => retrySessionCheck());
 
   useEffect(() => {
@@ -123,13 +139,13 @@ function useAuthSession() {
     // Sign out when another tab removes the token from storage.
     function onStorage(e: StorageEvent) {
       if (e.key === "octo_token" && e.newValue === null) {
-        onSignOut();
+        onSignOut("remote");
       }
     }
 
     // Sign out when another tab broadcasts a logout over BroadcastChannel.
     const unsubscribeLogout = subscribeToLogout(() => {
-      onSignOut();
+      onSignOut("remote");
     });
 
     window.addEventListener("session-expired", onSessionExpired);

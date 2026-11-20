@@ -34,11 +34,19 @@ vi.mock("./api", async () => {
 
 const clearTokenMock = vi.fn();
 const getTokenMock = vi.fn();
+const logoutCurrentSessionMock = vi.fn();
+const signOutMock = vi.fn();
+const broadcastLogoutMock = vi.fn();
+const subscribeToLogoutMock = vi.fn();
 
 vi.mock("./auth", () => ({
   clearToken: (...args: unknown[]) => clearTokenMock(...args),
   getToken: (...args: unknown[]) => getTokenMock(...args),
   setToken: vi.fn(),
+  logoutCurrentSession: (...args: unknown[]) => logoutCurrentSessionMock(...args),
+  signOut: (...args: unknown[]) => signOutMock(...args),
+  broadcastLogout: (...args: unknown[]) => broadcastLogoutMock(...args),
+  subscribeToLogout: (...args: unknown[]) => subscribeToLogoutMock(...args),
 }));
 
 const { AuthProvider, useAuth, isAuthenticationFailure: isAuthFailureFromModule } =
@@ -74,9 +82,15 @@ describe("useAuth session handling", () => {
     logoutMock.mockReset();
     clearTokenMock.mockReset();
     getTokenMock.mockReset();
+    logoutCurrentSessionMock.mockReset();
+    signOutMock.mockReset();
+    broadcastLogoutMock.mockReset();
+    subscribeToLogoutMock.mockReset();
     getTokenMock.mockReturnValue("token");
     meMock.mockResolvedValue({ id: "1", email: "user@example.com" });
     logoutMock.mockResolvedValue(undefined);
+    logoutCurrentSessionMock.mockResolvedValue(undefined);
+    signOutMock.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -105,6 +119,98 @@ describe("useAuth session handling", () => {
     expect(replaceMock).toHaveBeenCalledTimes(1);
     expect(clearTokenMock).toHaveBeenCalled();
     expect(logoutMock).toHaveBeenCalledTimes(1);
+    expect(logoutCurrentSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("revokes the current session on the server when logout() is called", async () => {
+    const { result } = renderHook(() => useAuth(), { wrapper });
+
+    await waitFor(() => {
+      expect(result.current.user).not.toBeNull();
+    });
+
+    replaceMock.mockClear();
+    logoutCurrentSessionMock.mockClear();
+
+    await act(async () => {
+      await result.current.logout();
+    });
+
+    await waitFor(() => {
+      expect(logoutCurrentSessionMock).toHaveBeenCalledTimes(1);
+    });
+
+    expect(logoutCurrentSessionMock).toHaveBeenCalledWith("token");
+    expect(clearTokenMock).toHaveBeenCalled();
+    expect(replaceMock).toHaveBeenCalledWith("/login");
+  });
+
+  it("still signs out locally when the server revoke request fails", async () => {
+    logoutCurrentSessionMock.mockRejectedValue(new TypeError("offline"));
+
+    const { result } = renderHook(() => useAuth(), { wrapper });
+
+    await waitFor(() => {
+      expect(result.current.user).not.toBeNull();
+    });
+
+    replaceMock.mockClear();
+
+    await act(async () => {
+      await result.current.logout();
+    });
+
+    await waitFor(() => {
+      expect(replaceMock).toHaveBeenCalledWith("/login");
+    });
+
+    expect(clearTokenMock).toHaveBeenCalled();
+    expect(result.current.user).toBeNull();
+  });
+
+  it("includes the query string and hash in the encoded next param", async () => {
+    const originalLocation = window.location;
+
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      writable: true,
+      value: {
+        ...originalLocation,
+        pathname: "/dashboard/wallets/abc/transactions",
+        search: "?before=xyz",
+        hash: "#top",
+        href: "http://localhost/dashboard/wallets/abc/transactions?before=xyz#top",
+        origin: "http://localhost",
+      },
+    });
+
+    try {
+      const { result } = renderHook(() => useAuth(), { wrapper });
+
+      await waitFor(() => {
+        expect(result.current.user).not.toBeNull();
+      });
+
+      replaceMock.mockClear();
+
+      await act(async () => {
+        await result.current.logout();
+      });
+
+      const expectedNext = encodeURIComponent(
+        "/dashboard/wallets/abc/transactions?before=xyz#top",
+      );
+
+      await waitFor(() => {
+        expect(replaceMock).toHaveBeenCalledWith(`/login?next=${expectedNext}`);
+      });
+    } finally {
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        writable: true,
+        value: originalLocation,
+      });
+    }
   });
 
   it("signs the user out when a storage event removes octo_token", async () => {
@@ -133,6 +239,7 @@ describe("useAuth session handling", () => {
     expect(clearTokenMock).toHaveBeenCalled();
     expect(replaceMock).toHaveBeenCalledWith("/login");
     expect(replaceMock).toHaveBeenCalledTimes(1);
+    expect(logoutCurrentSessionMock).not.toHaveBeenCalled();
   });
 
   it("re-calls me() when retrySessionCheck is invoked", async () => {
